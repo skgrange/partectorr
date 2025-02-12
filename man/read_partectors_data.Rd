@@ -2,7 +2,8 @@
 % Please edit documentation in R/read_partectors_data.R
 \name{read_partectors_data}
 \alias{read_partectors_data}
-\title{Function to read the Naneos Partector 2 ultrafine particle monitor data files.}
+\title{Function to read the Naneos Partector 2 ultrafine particle (UFP) monitor 
+data files.}
 \usage{
 read_partectors_data(
   file,
@@ -19,7 +20,8 @@ read_partectors_data(
 }
 \arguments{
 \item{file}{A vector of Naneos Partector 2 ultrafine particle monitor data
-files.}
+files. The files can be the monitor's instrument logs, an export from 
+Nanoes's cloud database, or the Java tool export.}
 
 \item{tz_in_file}{What time zone are the dates represented in the data files?}
 
@@ -48,7 +50,8 @@ file to the tibble return.}
 Tibble.
 }
 \description{
-Function to read the Naneos Partector 2 ultrafine particle monitor data files.
+Function to read the Naneos Partector 2 ultrafine particle (UFP) monitor 
+data files.
 }
 \author{
 Stuart K. Grange

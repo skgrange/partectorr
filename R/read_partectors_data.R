@@ -1,9 +1,11 @@
-#' Function to read the Naneos Partector 2 ultrafine particle monitor data files.
+#' Function to read the Naneos Partector 2 ultrafine particle (UFP) monitor 
+#' data files. 
 #' 
 #' @author Stuart K. Grange
 #' 
 #' @param file A vector of Naneos Partector 2 ultrafine particle monitor data
-#' files. 
+#' files. The files can be the monitor's instrument logs, an export from 
+#' Nanoes's cloud database, or the Java tool export. 
 #' 
 #' @param tz_in_file What time zone are the dates represented in the data files? 
 #' 
@@ -78,10 +80,16 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
   # Where does the file's preamble end?
   index_end_preamble <- stringr::str_which(text, "^time")
   
-  # File format test
-  is_instrument_log <- length(index_end_preamble) != 0L
+  # File format tests
+  file_type <- dplyr::case_when(
+    length(index_end_preamble) != 0L ~ "instrument_log",
+    stringr::str_detect(text[3], "dateTime") ~ "nanos_cloud_export", 
+    stringr::str_detect(text[1], "java tool") ~ "java_tool_export", 
+    .default = NA_character_
+  )
   
-  if (is_instrument_log) {
+  # Handle the different file formats
+  if (file_type == "instrument_log") {
     
     # Filter to preamble text
     text_preamble <- text[1:(index_end_preamble - 2L)]
@@ -90,7 +98,6 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
     df_preamble <- format_partectors_data_preamble(
       text_preamble, 
       tz_in_file = tz_in_file,
-      serial_number_as_character = serial_number_as_character,
       date_calibration_as_numeric = date_calibration_as_numeric
     )
     
@@ -109,7 +116,7 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
       relocate(!!names(df_preamble),
                date)
     
-  } else {
+  } else if (file_type == "nanos_cloud_export") {
     
     # Get identifiers from the first line of the data file
     identifiers <- stringr::str_split_1(text[1], " SN ")
@@ -117,11 +124,6 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
     # Format identifiers
     monitor_type <- stringr::str_to_lower(identifiers[1])
     serial_number <- as.integer(identifiers[2])
-    
-    # To character if desired
-    if (serial_number_as_character) {
-      serial_number <- as.character(serial_number)
-    }
     
     # Parse data table, dates will be represented in UTC and assuming the dates
     # are the star date
@@ -134,8 +136,70 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
       relocate(monitor_type,
                serial_number)
     
+  } else if (file_type == "java_tool_export") {
+    
+    # Get identifier line
+    identifiers <- stringr::str_subset(text, "partector")[2]
+    
+    # Format serial number
+    serial_number <- identifiers %>% 
+      stringr::str_split_1("partector|running") %>% 
+      .[2] %>% 
+      as.integer()
+    
+    # Get firmware version
+    firmware_version <- identifiers %>% 
+      stringr::str_split_1("firmware|\\]") %>% 
+      .[2] %>% 
+      stringr::str_squish()
+    
+    # Get start date
+    date_start_identifiers <- text %>% 
+      .[1:10] %>% 
+      stringr::str_subset("File start") %>% 
+      stringr::str_split_fixed(":", n = 2) %>% 
+      .[, 2] %>% 
+      stringr::str_remove("]") %>% 
+      stringr::str_squish()
+    
+    # Combine date and times
+    date_start <- stringr::str_c(
+      date_start_identifiers[1], date_start_identifiers[2], sep = " "
+    )
+    
+    # Parse date
+    date_start <- lubridate::dmy_hms(date_start, tz = tz_in_file)
+    
+    # Parse tabular data and add a few variables, warning suppression is for 
+    # too many columns in the file
+    suppressWarnings(
+      df <- text[-1:-5] %>% 
+        stringr::str_remove("\t$") %>% 
+        I() %>% 
+        readr::read_delim(
+          delim = "\t",
+          locale = readr::locale(decimal_mark = ","), 
+          show_col_types = FALSE, 
+          progress = FALSE
+        ) %>% 
+        select(-dplyr::matches("^X20")) %>% 
+        rename(date = Time) %>% 
+        mutate(date = date + !!date_start,
+               monitor_type = "partector2",
+               serial_number = !!serial_number,
+               firmware_version = !!firmware_version) %>% 
+        relocate(monitor_type,
+                 serial_number,
+                 firmware_version)
+    )
+    
   }
   
+  # To character if desired
+  if (serial_number_as_character) {
+    df <- mutate(df, serial_number = as.character(serial_number))
+  }
+
   # Calculate date_end, might need to be enhanced further, but the instrument 
   # waits for two seconds between measurement cycles
   measurement_duration <- df %>% 
@@ -157,7 +221,9 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
   if (as_long) {
     
     # Make longer data
-    df <- tidyr::pivot_longer(df, -monitor_type:-date_end, names_to = "variable")
+    df <- tidyr::pivot_longer(
+      df, -monitor_type:-date_end, names_to = "variable", values_drop_na = TRUE
+    )
     
     # Make better names for variables
     if (variable_switch) {
@@ -186,7 +252,6 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
 
 
 format_partectors_data_preamble <- function(text, tz_in_file, 
-                                            serial_number_as_character,
                                             date_calibration_as_numeric) {
   
   # Get monitor type and serial number
@@ -197,11 +262,6 @@ format_partectors_data_preamble <- function(text, tz_in_file,
   
   # Get serial number
   serial_number <- as.integer(monitor_type[2])
-  
-  # To character if desired
-  if (serial_number_as_character) {
-    serial_number <- as.character(serial_number)
-  }
   
   # Get calibration date, time zone does not matter too much here
   date_calibration <- text %>% 
@@ -255,51 +315,53 @@ format_partectors_data_preamble <- function(text, tz_in_file,
 partectors_variables_look_up <- function(select = TRUE) {
   
   # The look-up table
-  df <- tibble::tribble(                                                                                                                                
-    ~data_source,                   ~variable,               ~variable_clean,                    ~unit,         ~priority,
-    "instrument_log; cloud_export", "number",                "particle_number",                  "#.cm3",       1,        
-    "instrument_log",               "diam",                  "particle_diameter",                "nm",          1,        
-    "instrument_log",               "LDSA",                  "lung_deposited_surface_area",      "um2.cm3",     1,        
-    "instrument_log",               "surface",               "total_surface_area",               "um2.cm3",     1,        
-    "instrument_log; cloud_export", "mass",                  "pm0.3",                            "ug.m-3",      1,        
-    "instrument_log",               "sigma",                 "particle_size_distribution_sigma", NA_character_, 0,        
-    "instrument_log",               "idiff",                 "diffusion_current",                "na",          0,        
-    "instrument_log",               "ucor",                  "ucor",                             NA_character_, 0,        
-    "instrument_log",               "DV",                    "deposition_voltage",               "volts",       1,        
-    "instrument_log; cloud_export", "T",                     "temperature_device",               "degrees.c",   1,        
-    "instrument_log; cloud_export", "RH",                    "relative_humidity_device",         "percent",     1,        
-    "instrument_log",               "P",                     "absolute_pressure",                "mbar",        1,        
-    "instrument_log",               "flow",                  "flow_rate",                        "l.min-1",     1,        
-    "instrument_log",               "bat",                   "battery",                          "volts",       1,        
-    "instrument_log",               "Ipump",                 "pump_current",                     "ma",          1,        
-    "instrument_log",               "error",                 "error_status",                     NA_character_, 1,        
-    "instrument_log",               "PWMpump",               "pump_control_signal",              "percent",     0,        
-    "instrument_log",               "steps",                 "algorithm_iteration_count",        NA_character_, 0,        
-    "instrument_log",               "n10.00",                "pnc_10_nm",                        "dN/dlogD",    1,        
-    "instrument_log",               "n16.26",                "pnc_16.26_nm",                     "dN/dlogD",    1,        
-    "instrument_log",               "n26.43",                "pnc_26.43_nm",                     "dN/dlogD",    1,        
-    "instrument_log",               "n42.96",                "pnc_42.96_nm",                     "dN/dlogD",    1,        
-    "instrument_log",               "n69.83",                "pnc_69.83_nm",                     "dN/dlogD",    1,        
-    "instrument_log",               "n113.52",               "pnc_113.52_nm",                    "dN/dlogD",    1,        
-    "instrument_log",               "n184.55",               "pnc_184.55_nm",                    "dN/dlogD",    1,        
-    "instrument_log",               "n300.00",               "pnc_300_nm",                       "dN/dlogD",    1,        
-    "instrument_log",               "A1",                    "a1_electrometer_amplitude",        "mv",          0,        
-    "instrument_log",               "A2",                    "a2_electrometer_amplitude",        "mv",          0,        
-    "instrument_log",               "A3",                    "a3_electrometer_amplitude",        "mv",          0,        
-    "instrument_log",               "A4",                    "a4_electrometer_amplitude",        "mv",          0,        
-    "instrument_log",               "A5",                    "a5_electrometer_amplitude",        "mv",          0,        
-    "instrument_log",               "calcflo",               "calcflo",                          NA_character_, 0,        
-    "cloud_export",                 "diameter",              "particle_diameter",                "nm",          1,        
-    "cloud_export",                 "ldsa",                  "lung_deposited_surface_area",      "um2.cm3",     1,        
-    "cloud_export",                 "particle_number_10nm",  "pnc_10_nm",                        "dN/dlogD",    1,        
-    "cloud_export",                 "particle_number_114nm", "pnc_113.52_nm",                    "dN/dlogD",    1,        
-    "cloud_export",                 "particle_number_16nm",  "pnc_16.26_nm",                     "dN/dlogD",    1,        
-    "cloud_export",                 "particle_number_185nm", "pnc_184.55_nm",                    "dN/dlogD",    1,        
-    "cloud_export",                 "particle_number_26nm",  "pnc_26.43_nm",                     "dN/dlogD",    1,        
-    "cloud_export",                 "particle_number_300nm", "pnc_300_nm",                       "dN/dlogD",    1,        
-    "cloud_export",                 "particle_number_43nm",  "pnc_42.96_nm",                     "dN/dlogD",    1,        
-    "cloud_export",                 "particle_number_70nm",  "pnc_69.83_nm",                     "dN/dlogD",    1,        
-    "cloud_export",                 "status",                "error_status",                     NA_character_, 1
+  df <- tibble::tribble(                                                                                                                                                                                    
+    ~file_type,                     ~variable,               ~variable_clean,                    ~unit,         ~priority, ~decimal_digits,
+    "instrument_log; cloud_export", "number",                "particle_number",                  "#.cm-3",      1,         0,              
+    "instrument_log",               "diam",                  "particle_diameter",                "nm",          1,         0,              
+    "instrument_log",               "LDSA",                  "lung_deposited_surface_area",      "um2.cm-3",    1,         2,              
+    "instrument_log",               "surface",               "total_surface_area",               "um2.cm-3",    1,         1,              
+    "instrument_log; cloud_export", "mass",                  "pm0.3",                            "ug.m-3",      1,         2,              
+    "instrument_log",               "sigma",                 "particle_size_distribution_sigma", NA_character_, 0,         NA_real_,       
+    "instrument_log",               "idiff",                 "diffusion_current",                "na",          0,         NA_real_,       
+    "instrument_log",               "ucor",                  "ucor",                             NA_character_, 0,         NA_real_,       
+    "instrument_log",               "DV",                    "deposition_voltage",               "volts",       1,         0,              
+    "instrument_log; cloud_export", "T",                     "temperature_device",               "degrees.c",   1,         0,              
+    "instrument_log; cloud_export", "RH",                    "relative_humidity_device",         "percent",     1,         1,              
+    "instrument_log",               "P",                     "absolute_pressure",                "mbar",        1,         1,              
+    "instrument_log",               "flow",                  "flow_rate",                        "l.min-1",     1,         3,              
+    "instrument_log",               "bat",                   "battery",                          "volts",       1,         2,              
+    "instrument_log",               "Ipump",                 "pump_current",                     "ma",          1,         2,              
+    "instrument_log",               "error",                 "error_status",                     NA_character_, 1,         NA_real_,       
+    "instrument_log",               "PWMpump",               "pump_control_signal",              "percent",     0,         NA_real_,       
+    "instrument_log",               "steps",                 "algorithm_iteration_count",        NA_character_, 0,         NA_real_,       
+    "instrument_log",               "n10.00",                "pnc_10_nm",                        "dN/dlogD",    1,         0,              
+    "instrument_log",               "n16.26",                "pnc_16.26_nm",                     "dN/dlogD",    1,         0,              
+    "instrument_log",               "n26.43",                "pnc_26.43_nm",                     "dN/dlogD",    1,         0,              
+    "instrument_log",               "n42.96",                "pnc_42.96_nm",                     "dN/dlogD",    1,         0,              
+    "instrument_log",               "n69.83",                "pnc_69.83_nm",                     "dN/dlogD",    1,         0,              
+    "instrument_log",               "n113.52",               "pnc_113.52_nm",                    "dN/dlogD",    1,         0,              
+    "instrument_log",               "n184.55",               "pnc_184.55_nm",                    "dN/dlogD",    1,         0,              
+    "instrument_log",               "n300.00",               "pnc_300_nm",                       "dN/dlogD",    1,         0,              
+    "instrument_log",               "A1",                    "a1_electrometer_amplitude",        "mv",          0,         NA_real_,       
+    "instrument_log",               "A2",                    "a2_electrometer_amplitude",        "mv",          0,         NA_real_,       
+    "instrument_log",               "A3",                    "a3_electrometer_amplitude",        "mv",          0,         NA_real_,       
+    "instrument_log",               "A4",                    "a4_electrometer_amplitude",        "mv",          0,         NA_real_,       
+    "instrument_log",               "A5",                    "a5_electrometer_amplitude",        "mv",          0,         NA_real_,       
+    "instrument_log",               "calcflo",               "calcflo",                          NA_character_, 0,         NA_real_,       
+    "nanos_cloud_export",           "diameter",              "particle_diameter",                "nm",          1,         0,              
+    "nanos_cloud_export",           "ldsa",                  "lung_deposited_surface_area",      "um2.cm-3",    1,         2,              
+    "nanos_cloud_export",           "particle_number_10nm",  "pnc_10_nm",                        "dN/dlogD",    1,         0,              
+    "nanos_cloud_export",           "particle_number_114nm", "pnc_113.52_nm",                    "dN/dlogD",    1,         0,              
+    "nanos_cloud_export",           "particle_number_16nm",  "pnc_16.26_nm",                     "dN/dlogD",    1,         0,              
+    "nanos_cloud_export",           "particle_number_185nm", "pnc_184.55_nm",                    "dN/dlogD",    1,         0,              
+    "nanos_cloud_export",           "particle_number_26nm",  "pnc_26.43_nm",                     "dN/dlogD",    1,         0,              
+    "nanos_cloud_export",           "particle_number_300nm", "pnc_300_nm",                       "dN/dlogD",    1,         0,              
+    "nanos_cloud_export",           "particle_number_43nm",  "pnc_42.96_nm",                     "dN/dlogD",    1,         0,              
+    "nanos_cloud_export",           "particle_number_70nm",  "pnc_69.83_nm",                     "dN/dlogD",    1,         0,              
+    "nanos_cloud_export",           "status",                "error_status",                     NA_character_, 1,         NA_real_,       
+    "java_tool_export",             "p",                     "absolute_pressure",                "mbar",        1,         1,              
+    "java_tool_export",             "altitude",              "elevation",                        "m",           0,         1
   ) %>% 
     mutate(priority = as.logical(priority))
   
