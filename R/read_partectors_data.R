@@ -41,7 +41,8 @@ read_partectors_data <- function(file, tz_in_file = "UTC", as_long = TRUE,
                                  names_to = rlang::zap(), verbose = FALSE, 
                                  progress = FALSE) {
   
-  file %>% 
+  # Read each file in turn
+  df <- file %>% 
     purrr::set_names(.) %>% 
     purrr::map(
       ~read_partectors_data_worker(
@@ -56,10 +57,22 @@ read_partectors_data <- function(file, tz_in_file = "UTC", as_long = TRUE,
       ), 
       .progress = progress
     ) %>% 
-    purrr::list_rbind(names_to = names_to) %>% 
-    arrange(serial_number,
-            variable,
-            date)
+    purrr::list_rbind(names_to = names_to)
+  
+  # Arrange the observations, different variables to arrange on depending on the 
+  # format choice
+  if (!as_long) {
+    df <- df %>% 
+      arrange(serial_number,
+              date)
+  } else {
+    df <- df %>% 
+      arrange(serial_number,
+              variable,
+              date)
+  }
+  
+  return(df)
   
 }
 
@@ -90,112 +103,19 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
   
   # Handle the different file formats
   if (file_type == "instrument_log") {
-    
-    # Filter to preamble text
-    text_preamble <- text[1:(index_end_preamble - 2L)]
-    
-    # Format preamble
-    df_preamble <- format_partectors_data_preamble(
-      text_preamble, 
+    df <- format_partectors_instrument_log(
+      text,
+      index_end_preamble = index_end_preamble,
       tz_in_file = tz_in_file,
       date_calibration_as_numeric = date_calibration_as_numeric
     )
-    
-    # Get start date
-    date_start <- df_preamble$date_start
-    
-    # Drop a variable
-    df_preamble <- select(df_preamble, -date_start)
-    
-    # Parse tabular data, parse date, and add identifiers
-    df <- text[index_end_preamble:length(text)] %>% 
-      readr::read_table(progress = FALSE) %>% 
-      mutate(date = time + !!date_start) %>% 
-      select(-time) %>% 
-      dplyr::bind_cols(df_preamble) %>% 
-      relocate(!!names(df_preamble),
-               date)
-    
   } else if (file_type == "nanos_cloud_export") {
-    
-    # Get identifiers from the first line of the data file
-    identifiers <- stringr::str_split_1(text[1], " SN ")
-    
-    # Format identifiers
-    monitor_type <- stringr::str_to_lower(identifiers[1])
-    serial_number <- as.integer(identifiers[2])
-    
-    # Parse data table, dates will be represented in UTC and assuming the dates
-    # are the star date
-    df <- text[-1] %>% 
-      I() %>% 
-      readr::read_csv(show_col_types = FALSE, progress = FALSE) %>% 
-      rename(date = dateTime) %>% 
-      mutate(monitor_type = !!monitor_type,
-             serial_number = !!serial_number) %>% 
-      relocate(monitor_type,
-               serial_number)
-    
+    df <- format_partectors_cloud_export(text)
   } else if (file_type == "java_tool_export") {
-    
-    # Get identifier line
-    identifiers <- stringr::str_subset(text, "partector")[2]
-    
-    # Format serial number
-    serial_number <- identifiers %>% 
-      stringr::str_split_1("partector|running") %>% 
-      .[2] %>% 
-      as.integer()
-    
-    # Get firmware version
-    firmware_version <- identifiers %>% 
-      stringr::str_split_1("firmware|\\]") %>% 
-      .[2] %>% 
-      stringr::str_squish()
-    
-    # Get start date
-    date_start_identifiers <- text %>% 
-      .[1:10] %>% 
-      stringr::str_subset("File start") %>% 
-      stringr::str_split_fixed(":", n = 2) %>% 
-      .[, 2] %>% 
-      stringr::str_remove("]") %>% 
-      stringr::str_squish()
-    
-    # Combine date and times
-    date_start <- stringr::str_c(
-      date_start_identifiers[1], date_start_identifiers[2], sep = " "
-    )
-    
-    # Parse date
-    date_start <- lubridate::dmy_hms(date_start, tz = tz_in_file)
-    
-    # Parse tabular data and add a few variables, warning suppression is for 
-    # too many columns in the file
-    suppressWarnings(
-      df <- text[-1:-5] %>% 
-        stringr::str_remove("\t$") %>% 
-        I() %>% 
-        readr::read_delim(
-          delim = "\t",
-          locale = readr::locale(decimal_mark = ","), 
-          show_col_types = FALSE, 
-          progress = FALSE
-        ) %>% 
-        select(-dplyr::matches("^X20")) %>% 
-        rename(date = Time) %>% 
-        mutate(date = date + !!date_start,
-               monitor_type = "partector2",
-               serial_number = !!serial_number,
-               firmware_version = !!firmware_version) %>% 
-        relocate(monitor_type,
-                 serial_number,
-                 firmware_version)
-    )
-    
+    df <- format_partectors_java_tool_export(text, tz_in_file = tz_in_file)
   }
   
-  # To character if desired
+  # An identifier to character if desired
   if (serial_number_as_character) {
     df <- mutate(df, serial_number = as.character(serial_number))
   }
@@ -209,7 +129,9 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
   
   # Test
   if (!measurement_duration %in% c(4L, 6L, 10L, 18L, 34L)) {
-    cli::cli_alert_warning("`{file}` contains a non-standard measurement duration...")
+    cli::cli_alert_warning(
+      "`{file}` contains a non-standard measurement duration..."
+    )
   }
   
   # Calculate date end
@@ -251,14 +173,50 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
 }
 
 
+format_partectors_instrument_log <- function(text, index_end_preamble, 
+                                             tz_in_file,
+                                             date_calibration_as_numeric) {
+  
+  # Filter to preamble text
+  text_preamble <- text[1:(index_end_preamble - 2L)]
+  
+  # Format preamble
+  df_preamble <- format_partectors_data_preamble(
+    text_preamble, 
+    tz_in_file = tz_in_file,
+    date_calibration_as_numeric = date_calibration_as_numeric
+  )
+  
+  # Get start date
+  date_start <- df_preamble$date_start
+  
+  # Drop a variable
+  df_preamble <- select(df_preamble, -date_start)
+  
+  # Parse tabular data, parse date, and add identifiers
+  df <- text[index_end_preamble:length(text)] %>% 
+    readr::read_table(progress = FALSE) %>% 
+    mutate(date = time + !!date_start) %>% 
+    select(-time) %>% 
+    dplyr::bind_cols(df_preamble) %>% 
+    relocate(!!names(df_preamble),
+             date)
+  
+  return(df)
+  
+}
+
+
 format_partectors_data_preamble <- function(text, tz_in_file, 
                                             date_calibration_as_numeric) {
   
   # Get monitor type and serial number
   monitor_type <- stringr::str_subset(text, "(?i)sn") %>% 
     stringr::str_split_1(" ") %>% 
-    .[-2] %>% 
-    str_to_underscore()
+    .[-2]
+  
+  # Format the first element
+  monitor_type[1] <- str_to_underscore(monitor_type[1])
   
   # Get serial number
   serial_number <- as.integer(monitor_type[2])
@@ -306,6 +264,93 @@ format_partectors_data_preamble <- function(text, tz_in_file,
              hardware_version) %>% 
     relocate(date_calibration,
              .before = date_start)
+  
+  return(df)
+  
+}
+
+
+format_partectors_cloud_export <- function(text) {
+  
+  # Get identifiers from the first line of the data file
+  identifiers <- stringr::str_split_1(text[1], " SN ")
+  
+  # Format identifiers
+  monitor_type <- stringr::str_to_lower(identifiers[1])
+  serial_number <- as.integer(identifiers[2])
+  
+  # Parse data table, dates will be represented in UTC and assuming the dates
+  # are the start date
+  df <- text[-1] %>% 
+    I() %>% 
+    readr::read_csv(show_col_types = FALSE, progress = FALSE) %>% 
+    rename(date = dateTime) %>% 
+    mutate(monitor_type = !!monitor_type,
+           serial_number = !!serial_number) %>% 
+    relocate(monitor_type,
+             serial_number)
+  
+  return(df)
+  
+}
+
+
+format_partectors_java_tool_export <- function(text, tz_in_file) {
+  
+  # Get identifier line
+  identifiers <- stringr::str_subset(text, "partector")[2]
+  
+  # Format serial number
+  serial_number <- identifiers %>% 
+    stringr::str_split_1("partector|running") %>% 
+    .[2] %>% 
+    as.integer()
+  
+  # Get firmware version
+  firmware_version <- identifiers %>% 
+    stringr::str_split_1("firmware|\\]") %>% 
+    .[2] %>% 
+    stringr::str_squish()
+  
+  # Get start date
+  date_start_identifiers <- text %>% 
+    .[1:10] %>% 
+    stringr::str_subset("File start") %>% 
+    stringr::str_split_fixed(":", n = 2) %>% 
+    .[, 2] %>% 
+    stringr::str_remove("]") %>% 
+    stringr::str_squish()
+  
+  # Combine date and times
+  date_start <- stringr::str_c(
+    date_start_identifiers[1], date_start_identifiers[2], sep = " "
+  )
+  
+  # Parse date
+  date_start <- lubridate::dmy_hms(date_start, tz = tz_in_file)
+  
+  # Parse tabular data and add a few variables, warning suppression is for 
+  # too many columns in the file
+  suppressWarnings(
+    df <- text[-1:-5] %>% 
+      stringr::str_remove("\t$") %>% 
+      I() %>% 
+      readr::read_delim(
+        delim = "\t",
+        locale = readr::locale(decimal_mark = ","), 
+        show_col_types = FALSE, 
+        progress = FALSE
+      ) %>% 
+      select(-dplyr::matches("^X20")) %>% 
+      rename(date = Time) %>% 
+      mutate(date = date + !!date_start,
+             monitor_type = "partector2",
+             serial_number = !!serial_number,
+             firmware_version = !!firmware_version) %>% 
+      relocate(monitor_type,
+               serial_number,
+               firmware_version)
+  )
   
   return(df)
   
