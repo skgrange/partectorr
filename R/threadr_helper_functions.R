@@ -105,3 +105,27 @@ str_date_formatted <- function(date = NA, time_zone = TRUE,
 
 
 cli_date <- function() stringr::str_c(str_date_formatted(), ":")
+
+
+has_sub_seconds <- function(date) {
+  
+  # Check data type
+  stopifnot(inherits(date, "POSIXct"))
+  
+  # Check for missing elements
+  stopifnot(!anyNA(date))
+  
+  # Get only unique values
+  date_unique <- unique(date)
+  
+  # Test if input is identical to it's floor rounded representation 
+  is_floor <- identical(
+    date_unique, lubridate::floor_date(date_unique, "seconds")
+  )
+  
+  # Do any elements fail the test?
+  has_sub_seconds <- any(!is_floor)
+  
+  return(has_sub_seconds)
+  
+}

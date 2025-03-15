@@ -128,10 +128,16 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
     detect_date_interval()
   
   # Test
-  if (!measurement_duration %in% c(1L, 2L, 4L, 6L, 10L, 18L, 34L)) {
+  if (!is.na(measurement_duration) && 
+      !measurement_duration %in% c(1L, 2L, 4L, 6L, 10L, 18L, 34L)) {
     cli::cli_alert_warning(
       "`{file}` contains a non-standard measurement duration..."
     )
+  }
+  
+  # Test for sub second dates
+  if (has_sub_seconds(df$date)) {
+    cli::cli_alert_warning("`{file}` contains sub second date accuracy...")
   }
   
   # Calculate date end
