@@ -137,7 +137,7 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
   
   # Test for sub second dates
   if (has_sub_seconds(df$date)) {
-    cli::cli_alert_warning("`{file}` contains sub second date accuracy...")
+    cli::cli_alert_warning("`{file}` contains sub-second date accuracy...")
   }
   
   # Calculate date end

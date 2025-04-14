@@ -8,5 +8,5 @@ The development version of the **partectorr** package can be easily installed wi
 
 ```
 # Install partectorr
-remotes::install_packages("skgrange/partectorr")
+remotes::install_github("skgrange/partectorr")
 ```
