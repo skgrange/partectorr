@@ -199,14 +199,17 @@ format_partectors_instrument_log <- function(text, index_end_preamble,
   # Drop a variable
   df_preamble <- select(df_preamble, -date_start)
   
-  # Parse tabular data, parse date, and add identifiers
-  df <- text[index_end_preamble:length(text)] %>% 
-    readr::read_table(progress = FALSE) %>% 
-    mutate(date = time + !!date_start) %>% 
-    select(-time) %>% 
-    dplyr::bind_cols(df_preamble) %>% 
-    relocate(!!names(df_preamble),
-             date)
+  # Parse tabular data, parse date, and add identifiers, warning suppression
+  # is for bad new line characters seen in some files
+  suppressWarnings(
+    df <- text[index_end_preamble:length(text)] %>% 
+      readr::read_table(progress = FALSE, guess_max = 10000L) %>% 
+      mutate(date = time + !!date_start) %>% 
+      select(-time) %>% 
+      dplyr::bind_cols(df_preamble) %>% 
+      relocate(!!names(df_preamble),
+               date)
+  )
   
   return(df)
   
