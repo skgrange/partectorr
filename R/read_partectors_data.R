@@ -90,6 +90,11 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
   # Read file as text
   text <- readr::read_lines(file, progress = FALSE)
   
+  # If the file is empty, this has been seen
+  if (length(text) == 0L) {
+    return(tibble())
+  }
+  
   # Where does the file's preamble end?
   index_end_preamble <- stringr::str_which(text, "^time")
   
