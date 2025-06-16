@@ -98,6 +98,11 @@ read_partectors_data_worker <- function(file, tz_in_file, as_long,
   # Where does the file's preamble end?
   index_end_preamble <- stringr::str_which(text, "^time")
   
+  # If the preamble is incomplete, return nothing
+  if (length(index_end_preamble) == 0L) {
+    return(tibble())
+  }
+  
   # File format tests
   file_type <- dplyr::case_when(
     length(index_end_preamble) != 0L ~ "instrument_log",
